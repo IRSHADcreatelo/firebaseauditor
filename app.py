@@ -12,11 +12,17 @@ from urllib.parse import urlparse
 import firebase_admin
 from firebase_admin import credentials, firestore
 
+firebase_json_str = os.environ.get("firebase_credentials")
+
 # 🔹 Firebase Initialization
+if firebase_json_str:
+    with open("firebase_credentials.json", "w") as f:
+        f.write(firebase_json_str)
+
+# Initialize Firebase app
 if not firebase_admin._apps:
     cred = credentials.Certificate("firebase_credentials.json")
     firebase_admin.initialize_app(cred)
-
 db = firestore.client()
 
 app = Flask(__name__)
