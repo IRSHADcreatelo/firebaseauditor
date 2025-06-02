@@ -8,22 +8,32 @@ from datetime import timedelta
 import logging
 from urllib.parse import urlparse
 
-# 🔹 Firebase Imports
 import firebase_admin
 from firebase_admin import credentials, firestore
+import json
+import os
+import io
+import logging
 
-firebase_json_str = os.environ.get("firebase_credentials")
+# Setup logging
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
-# 🔹 Firebase Initialization
-if firebase_json_str:
-    with open("firebase_credentials.json", "w") as f:
-        f.write(firebase_json_str)
+# 🔐 Get JSON string from Render environment variable
+firebase_json_str = os.environ.get("FIREBASE_CREDENTIALS")
 
-# Initialize Firebase app
-if not firebase_admin._apps:
-    cred = credentials.Certificate("firebase_credentials.json")
-    firebase_admin.initialize_app(cred)
-db = firestore.client()
+# ✅ Initialize Firebase with in-memory JSON
+if firebase_json_str and not firebase_admin._apps:
+    try:
+        cred_dict = json.loads(firebase_json_str)
+        cred = credentials.Certificate(cred_dict)
+        firebase_admin.initialize_app(cred)
+        db = firestore.client()
+        logger.info("✅ Firebase initialized and Firestore client created")
+    except Exception as e:
+        logger.error(f"🔥 Firebase initialization failed: {str(e)}")
+        db = None  # Prevent usage if setup failed
+
 
 app = Flask(__name__)
 
