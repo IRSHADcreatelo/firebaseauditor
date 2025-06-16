@@ -11,14 +11,10 @@ import requests
 from requests.exceptions import HTTPError
 import firebase_admin
 from firebase_admin import credentials, firestore
-from google.cloud.firestore_v1 import FieldFilter
 
 # Setup logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
-handler = logging.FileHandler('app.log')
-handler.setLevel(logging.DEBUG)
-logger.addHandler(handler)
 
 # Initialize Firebase
 firebase_json_str = os.environ.get("FIREBASE_CREDENTIALS")
@@ -79,62 +75,42 @@ def submit():
     try:
         if not request.is_json:
             logger.error("Request is not JSON")
-            response = jsonify({"error": "Request must be JSON"})
-            response.headers["X-Error-Details"] = "Invalid content type"
-            response.status_code = 400
-            return response
+            return jsonify({"error": "Request must be JSON"}, headers={"X-Error-Details": "Invalid content type"}), 400
             
         data = request.get_json()
         logger.info(f"Received request with data: {json.dumps(data, indent=2)}")
         
         if not data:
             logger.error("No data received in request")
-            response = jsonify({"error": "No data received"})
-            response.headers["X-Error-Details"] = "Empty request body"
-            response.status_code = 400
-            return response
+            return jsonify({"error": "No data received"}, headers={"X-Error-Details": "Empty request body"}), 400
 
         # Validate required fields
         required_fields = ['website', 'email', 'contactNumber']
         missing_fields = [field for field in required_fields if not data.get(field)]
         if missing_fields:
             logger.error(f"Missing required fields: {missing_fields}")
-            response = jsonify({
+            return jsonify({
                 "error": "Missing required fields",
                 "missing": missing_fields
-            })
-            response.headers["X-Error-Details"] = f"Missing fields: {missing_fields}"
-            response.status_code = 400
-            return response
+            }, headers={"X-Error-Details": f"Missing fields: {missing_fields}"}), 400
 
         # Validate email and phone
         if not validate_email(data.get('email', '')):
             logger.error(f"Invalid email format: {data.get('email', '')}")
-            response = jsonify({"error": "Invalid email format"})
-            response.headers["X-Error-Details"] = "Invalid email"
-            response.status_code = 400
-            return response
+            return jsonify({"error": "Invalid email format"}, headers={"X-Error-Details": "Invalid email"}), 400
         if not validate_phone(data.get('contactNumber', '')):
             logger.error(f"Invalid phone number format: {data.get('contactNumber', '')}")
-            response = jsonify({"error": "Invalid phone number format"})
-            response.headers["X-Error-Details"] = "Invalid phone"
-            response.status_code = 400
-            return response
+            return jsonify({"error": "Invalid phone number format"}, headers={"X-Error-Details": "Invalid phone"}), 400
 
         business_url = data.get('website', '')
         if not is_valid_url(business_url):
             logger.error(f"Invalid business URL: {business_url}")
-            response = jsonify({"error": "Invalid business URL"})
-            response.headers["X-Error-Details"] = "Invalid URL"
-            response.status_code = 400
-            return response
+            return jsonify({"error": "Invalid business URL"}, headers={"X-Error-Details": "Invalid URL"}), 400
 
         # Check cache in Firebase
         if db:
             try:
-                cached = db.collection("audit_submissions").where(
-                    filter=FieldFilter("inputData.website", "==", business_url)
-                ).get()
+                cached = db.collection("audit_submissions").where("inputData.website", "==", business_url).get()
                 if cached:
                     cached_data = cached[0].to_dict()
                     logger.info("Returning cached audit report")
@@ -159,49 +135,28 @@ def submit():
         
         if not GEMINI_API_KEY:
             logger.error("Gemini API key not configured")
-            response = jsonify({"error": "API service unavailable"})
-            response.headers["X-Error-Details"] = "Missing API key"
-            response.status_code = 503
-            return response
+            return jsonify({"error": "API service unavailable"}, headers={"X-Error-Details": "Missing API key"}), 503
             
         logger.info("Sending request to Gemini API")
         gemini_response = send_to_gemini(prompt)
         
         if isinstance(gemini_response, str) and "Too Many Requests" in gemini_response:
             logger.error("Gemini API rate limit exceeded")
-            response = jsonify({
+            return jsonify({
                 "error": "Rate limit exceeded",
                 "details": "Please try again later or contact Google Cloud Support for a higher quota."
-            })
-            response.headers["X-Error-Details"] = "API rate limit exceeded"
-            response.status_code = 429
-            return response
-        elif isinstance(gemini_response, str) and "404 Client Error" in gemini_response:
-            logger.error("Gemini API model not found")
-            response = jsonify({
-                "error": "Model not found",
-                "details": "The requested Gemini model is unavailable."
-            })
-            response.headers["X-Error-Details"] = "Model not found"
-            response.status_code = 502
-            return response
+            }, headers={"X-Error-Details": "API rate limit exceeded"}), 429
         elif isinstance(gemini_response, str) and gemini_response.startswith("Error"):
             logger.error(f"Gemini API error: {gemini_response}")
-            response = jsonify({"error": gemini_response})
-            response.headers["X-Error-Details"] = "API error"
-            response.status_code = 502
-            return response
+            return jsonify({"error": gemini_response}, headers={"X-Error-Details": "API error"}), 502
 
         report_data = extract_report_data(gemini_response)
         if not report_data:
             logger.error("Failed to extract report data from Gemini response")
-            response = jsonify({
+            return jsonify({
                 "error": "Could not generate audit report",
                 "details": "Failed to process API response"
-            })
-            response.headers["X-Error-Details"] = "Invalid API response"
-            response.status_code = 500
-            return response
+            }, headers={"X-Error-Details": "Invalid API response"}), 500
 
         session['report_data'] = report_data
         logger.info("Successfully generated audit report")
@@ -225,13 +180,10 @@ def submit():
 
     except Exception as e:
         logger.error(f"Error in submit endpoint: {str(e)}", exc_info=True)
-        response = jsonify({
+        return jsonify({
             "error": "Internal server error",
             "details": str(e)
-        })
-        response.headers["X-Error-Details"] = "Unexpected error"
-        response.status_code = 500
-        return response
+        }, headers={"X-Error-Details": "Unexpected error"}), 500
 
 def is_valid_url(url):
     try:
@@ -317,8 +269,8 @@ IMPORTANT:
 6. Ensure the response is valid JSON with no additional text, comments, or code blocks
 """
 
-def send_to_gemini(prompt, retries=5, backoff_factor=3):
-    models = ["gemini-1.5-pro-latest", "gemini-1.5-pro"]
+def send_to_gemini(prompt, retries=3, backoff_factor=2):
+    models = ["gemini-1.5-pro-latest", "gemini-1.0-pro"]  # Fallback to gemini-1.0-pro
     for model in models:
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
@@ -388,7 +340,7 @@ def send_to_gemini(prompt, retries=5, backoff_factor=3):
                     break
 
         except Exception as e:
-            logger.error(f"Unexpected error: {str(e)}", exc_info=True)
+            logger.error(f"Unexpected error in send_to_gemini for {model}: {str(e)}", exc_info=True)
             if model == models[-1]:
                 return f"Processing Error: {str(e)}"
 
@@ -400,8 +352,8 @@ def extract_report_data(gemini_response):
         if validate_report_data(direct_parse):
             return direct_parse
         
-        # Extract JSON-like object with regex
-        match = re.search(r'{[\s\S]*}', gemini_response, re.DOTALL)
+        # Try regex extraction
+        match = re.search(r'{[\s\S]*?}', gemini_response, re.DOTALL)
         if match:
             js_object = match.group(0)
             logger.debug(f"Extracted JSON-like string: {js_object}")
@@ -476,10 +428,7 @@ def _build_cors_preflight_response():
     origin = request.headers.get('Origin')
     if origin not in allowed_origins:
         logger.error(f"Origin not allowed: {origin}")
-        response = jsonify({"error": "Origin not allowed"})
-        response.headers["X-Error-Details"] = "Invalid origin"
-        response.status_code = 403
-        return response
+        return jsonify({"error": "Origin not allowed"}, headers={"X-Error-Details": "Invalid origin"}), 403
     response = jsonify({"message": "CORS preflight"})
     response.headers.add("Access-Control-Allow-Origin", origin)
     response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
