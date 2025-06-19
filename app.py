@@ -93,20 +93,12 @@ def submit():
         if business_url and not is_valid_url(business_url):
             return jsonify({"error": "Invalid business URL"}), 400
 
-         instagram_url = data.get('instagram', '')
-        # if instagram_url and not is_valid_url(instagram_url):
-        #     return jsonify({"error": "Invalid Instagram URL"}), 400
-
-         facebook_url = data.get('facebook', '')
-        # if facebook_url and not is_valid_url(facebook_url):
-        #     return jsonify({"error": "Invalid Facebook URL"}), 400
-
         # Build the prompt with all available data
         prompt = build_createlo_prompt(
             data.get('businessName', ''),
             business_url,
-            instagram_url,
-            facebook_url,
+            data.get('instagram', ''),
+            data.get('facebook', ''),
             data.get('email', ''),
             data.get('contactNumber', ''),
             data.get('businessDescription', '')
