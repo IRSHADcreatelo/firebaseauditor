@@ -7,22 +7,16 @@ import json
 from datetime import timedelta
 import logging
 from urllib.parse import urlparse
-
 import firebase_admin
 from firebase_admin import credentials, firestore
-import json
-import os
-import io
-import logging
+import uuid
 
 # Setup logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# 🔐 Get JSON string from Render environment variable
+# Initialize Firebase with in-memory JSON
 firebase_json_str = os.environ.get("FIREBASE_CREDENTIALS")
-
-# ✅ Initialize Firebase with in-memory JSON
 if firebase_json_str and not firebase_admin._apps:
     try:
         cred_dict = json.loads(firebase_json_str)
@@ -32,13 +26,9 @@ if firebase_json_str and not firebase_admin._apps:
         logger.info("✅ Firebase initialized and Firestore client created")
     except Exception as e:
         logger.error(f"🔥 Firebase initialization failed: {str(e)}")
-        db = None  # Prevent usage if setup failed
-
+        db = None
 
 app = Flask(__name__)
-
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
 
 app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24))
 app.config.update(
@@ -90,8 +80,8 @@ def submit():
         if not data:
             return jsonify({"error": "No data received"}), 400
 
-        # Validate required fields
-        required_fields = ['website', 'email', 'contactNumber']
+        # Validate required fields (website is not required)
+        required_fields = ['email', 'contactNumber']
         missing_fields = [field for field in required_fields if not data.get(field)]
         if missing_fields:
             return jsonify({
@@ -100,19 +90,26 @@ def submit():
             }), 400
 
         business_url = data.get('website', '')
-        if not is_valid_url(business_url):
+        if business_url and not is_valid_url(business_url):
             return jsonify({"error": "Invalid business URL"}), 400
+
+        instagram_url = data.get('instagram', '')
+        if instagram_url and not is_valid_url(instagram_url):
+            return jsonify({"error": "Invalid Instagram URL"}), 400
+
+        facebook_url = data.get('facebook', '')
+        if facebook_url and not is_valid_url(facebook_url):
+            return jsonify({"error": "Invalid Facebook URL"}), 400
 
         # Build the prompt with all available data
         prompt = build_createlo_prompt(
+            data.get('businessName', ''),
             business_url,
+            instagram_url,
+            facebook_url,
             data.get('email', ''),
             data.get('contactNumber', ''),
-            data.get('businessCategory', ''),
-            data.get('categoryHint', ''),
-            data.get('ownerName', ''),
-            data.get('instagram', ''),
-            data.get('facebook', '')
+            data.get('businessDescription', '')
         )
         
         if not GEMINI_API_KEY:
@@ -134,10 +131,11 @@ def submit():
                 "details": "Failed to process API response"
             }), 500
 
+        # Store report data in session
         session['report_data'] = report_data
         logger.info("Successfully generated audit report")
 
-        # 🔹 Store user input + AI response in Firebase
+        # Store user input + AI response in Firebase
         try:
             combined_data = {
                 "inputData": data,
@@ -161,6 +159,8 @@ def submit():
         }), 500
 
 def is_valid_url(url):
+    if not url:
+        return True  # Empty URL is valid since website is optional
     try:
         result = urlparse(url)
         return all([result.scheme, result.netloc])
@@ -168,72 +168,77 @@ def is_valid_url(url):
         logger.error(f"Invalid URL {url}: {str(e)}")
         return False
 
-def build_createlo_prompt(url, email, phone, category=None, category_hint=None, 
-                         owner_name=None, instagram=None, facebook=None):
+def build_createlo_prompt(business_name, website, instagram, facebook, email, phone, business_description):
     additional_info = []
-    if category:
-        additional_info.append(f"Business Category: {category}")
-    if category_hint:
-        additional_info.append(f"Category Hint: {category_hint}")
-    if owner_name:
-        additional_info.append(f"Owner Name: {owner_name}")
+    if business_name:
+        additional_info.append(f"Business Name: {business_name}")
+    if business_description:
+        additional_info.append(f"Business Description: {business_description}")
+    if email:
+        additional_info.append(f"Email: {email}")
+    if phone:
+        additional_info.append(f"Phone: {phone}")
+    if website:
+        additional_info.append(f"Website URL: {website}")
     if instagram:
-        additional_info.append(f"Instagram Handle: {instagram}")
+        additional_info.append(f"Instagram URL: {instagram}")
     if facebook:
-        additional_info.append(f"Facebook Page: {facebook}")
+        additional_info.append(f"Facebook URL: {facebook}")
         
     additional_info_str = "\n".join(additional_info) + "\n" if additional_info else ""
     
     return f"""
-You are a digital marketing audit expert working for the Createlo brand. Your goal is to analyze a business's website and provide insights and actionable next steps that highlight opportunities and encourage engagement with Createlo's services.
-Business Data:
-- URL: {url}
-- Email: {email}
-- Phone: {phone}
+You are a digital marketing audit expert working for the Createlo brand. Your task is to analyze a business’s online presence and return a detailed audit report in structured JavaScript format. Use the provided business information to assess their website (if provided) and social media channels. Provide valuable insights and actionable tips to improve their digital marketing effectiveness and encourage engagement with Createlo services.
+
+Scoring & Validation Rules:
+1. If the website URL is valid and reachable:
+   * Calculate total score based on:
+     * Website: 50%
+     * Instagram: 25%
+     * Facebook: 25%
+   * Each individual score (websiteScore, instagramScore, facebookScore) should be between 60 and 100, and overallScore should reflect the weighted average.
+2. If the website is missing or unreachable:
+   * Only use Instagram and Facebook for scoring.
+   * In this case:
+     * Instagram: 50%
+     * Facebook: 50%
+   * Final scores (instagramScore, facebookScore, overallScore) should fall between 60 and 100, but the overallScore must be reduced by 50% to reflect the missing website weight.
+   * Additionally, generate multiple relevant tips and suggestions encouraging the business to build or improve their website presence and clearly recommend Createlo services for doing so.
+3. If any social media channel is not found, state "Not found" in the summary and assign a default minimum score of 60 to that channel.
+
+Input Fields:
 {additional_info_str}
 
-Generate a detailed audit report with the following structure:
-
+Output Format: Return a clean, valid JavaScript object with this exact field order:
 const reportData = {{
-  // Basic business info inferred from website
   client: "<Business name>",
-  businessoverview: "<1-2 sentence overview>",
-  
-  // Social media analysis (make reasonable assumptions if not provided)
-  instagramSummary: "<analysis>",
-  facebookSummary: "<analysis>",
-  
-  // Scores (60-100 range)
-  instagramScore: <number>,
-  facebookScore: <number>,
-  overallScore: <average>,
-  
-  // Combined summary
-  businesssummary: "<10-sentence summary>",
-  
-  // Marketing insights (4-8 items)
+  businessoverview: "<Short description of business>",
+  instagramSummary: "<analysis or 'Not found'>",
+  facebookSummary: "<analysis or 'Not found'>",
+  instagramScore: <number>, // 60–100
+  facebookScore: <number>, // 60–100
+  websiteScore: <number>, // 60–100 (if applicable)
+  overallScore: <number>, // weighted calculation based on rules
+  businesssummary: "<10-sentence overview of their digital presence, performance on each platform, website quality, engagement opportunities, and areas for growth>",
   insights: [
-    "<specific insight>",
-    "<specific insight>",
-    "<specific insight>"
+    "<Insight about marketing or digital gaps>",
+    "<Insight about engagement opportunity>",
+    "<Insight about platform-specific performance>"
   ],
-  
-  // Generate several practical and actionable tips derived DIRECTLY from the generated 'insights'. Each tip should identify a specific area for improvement or opportunity related to their online presence (as inferred from the website) and suggest a relevant action. FRAME these tips to naturally lead into recommending a Createlo service (like booking a call, requesting an audit/quote, starting a test campaign) as the solution or next step. Maintain a professional, encouraging, yet action-oriented toneActionable tips (3-5 items)
   tips: [
-    "<specific tip mentioning Createlo service>",
-    "<specific tip mentioning Createlo service>",
-    "<specific tip mentioning Createlo service>"
+    "<Unlimited actionable tips with Createlo call to action>",
+    "<Each tip should map to an insight and include a suggestion>",
+    "<If website is missing, give strong web-building tips and recommend Createlo services>"
   ]
 }};
 
 IMPORTANT:
-
 1. Maintain EXACT field order as shown above
 2. Only return the JavaScript object
 3. Scores should be between 60-100
 4. Tips should reference Createlo services
 5. Make reasonable assumptions for missing info
-
+6. If website is missing, include websiteScore as null
 """
 
 def extract_report_data(gemini_response):
@@ -275,43 +280,33 @@ def extract_report_data(gemini_response):
         return None
 
 def clean_json_string(js_str):
-    """Clean and normalize JSON string with proper quote handling"""
     try:
-        # First remove all comments
+        # Remove comments
         cleaned = re.sub(r'/\*.*?\*/', '', js_str, flags=re.DOTALL)
         cleaned = re.sub(r'//.*?$', '', cleaned, flags=re.MULTILINE)
         
-        # Handle escaped quotes first by temporarily replacing them
+        # Handle escaped quotes
         cleaned = cleaned.replace(r'\"', '%%QUOTE%%')
-        
-        # Replace all remaining quotes with escaped versions
         cleaned = cleaned.replace('"', r'\"')
-        
-        # Restore the originally escaped quotes
         cleaned = cleaned.replace('%%QUOTE%%', r'\"')
         
-        # Fix property names (ensure they're quoted)
+        # Fix property names
         cleaned = re.sub(r'([{,]\s*)(\w+)\s*:', lambda m: f'{m.group(1)}"{m.group(2)}":', cleaned)
         
         # Remove trailing commas
         cleaned = re.sub(r',\s*([}\]])', r'\1', cleaned)
         
-        # Now properly parse the JSON
-        # First wrap in quotes to make valid JSON string, then decode
+        # Parse JSON
         temp_json = f'"{cleaned}"'
         decoded_str = json.loads(temp_json)
-        
-        # Now parse the decoded string as JSON
         return json.loads(decoded_str)
         
     except json.JSONDecodeError as e:
         logger.error(f"JSON cleaning failed at position {e.pos}: {str(e)}")
         logger.error(f"Context: {cleaned[max(0,e.pos-30):e.pos+30]}")
         return None
-    
 
 def validate_report_data(data):
-    """Validate the extracted report data structure and Field orders"""
     required_fields = {
         'client': str,
         'businessoverview': str,
@@ -335,15 +330,23 @@ def validate_report_data(data):
             return False
     
     # Validate scores
-    for score_field in ['instagramScore', 'facebookScore', 'overallScore']:
-        if not (0 <= data[score_field] <= 100):
-            logger.error(f"Invalid {score_field}: must be between 0-100")
+    for score_field in ['instagramScore', 'facebookScore']:
+        if not (60 <= data[score_field] <= 100):
+            logger.error(f"Invalid {score_field}: must be between 60-100")
             return False
+    
+    if not (0 <= data['overallScore'] <= 100):
+        logger.error("Invalid overallScore: must be between 0-100")
+        return False
+    
+    if 'websiteScore' in data and data['websiteScore'] is not None and not (60 <= data['websiteScore'] <= 100):
+        logger.error("Invalid websiteScore: must be between 60-100 or null")
+        return False
     
     # Validate lists
     for list_field in ['insights', 'tips']:
-        if len(data[list_field]) < 2:
-            logger.error(f"{list_field} must have at least 2 items")
+        if len(data[list_field]) < 3:
+            logger.error(f"{list_field} must have at least 3 items")
             return False
     
     return True
@@ -364,10 +367,11 @@ def send_to_gemini(prompt):
                     "  \"facebookSummary\": \"...\",\n" +
                     "  \"instagramScore\": 0,\n" +
                     "  \"facebookScore\": 0,\n" +
+                    "  \"websiteScore\": null,\n" +
                     "  \"overallScore\": 0,\n" +
                     "  \"businesssummary\": \"...\",\n" +
-                    "  \"insights\": [\"...\", \"...\"],\n" +
-                    "  \"tips\": [\"...\", \"...\"]\n" +
+                    "  \"insights\": [\"...\", \"...\", \"...\"],\n" +
+                    "  \"tips\": [\"...\", \"...\", \"...\"]\n" +
                     "}\n\n" +
                     "No additional text, comments, or explanations."
                 }]
@@ -390,7 +394,6 @@ def send_to_gemini(prompt):
         response_json = response.json()
         logger.debug(f"API response: {json.dumps(response_json, indent=2)}")
         
-        # Extract response text
         if not response_json.get('candidates'):
             raise ValueError("No candidates in response")
             
